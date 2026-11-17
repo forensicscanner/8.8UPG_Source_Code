@@ -1,4 +1,4 @@
-﻿# ForensicScanner 8.8 - Roblox-focused Windows forensic detection pipeline
+# ForensicScanner 8.8 - Roblox-focused Windows forensic detection pipeline
 # Created by Mito | presentation, Defender-resource, and scan-completeness fixes
 # 8.8: fixes RawEvidence/Evidence sync in correlation and final confidence scoring.
 # Performance: first baseline keeps full SHA256 coverage but defers PE/signature work
@@ -16,15 +16,20 @@ param(
   [int]$MonitorIntervalSeconds = 8
 )
 
-# Startup attribution banner (kept after param so PowerShell parameter binding works).
-# Keep the banner visible for 3 seconds; do not clear it later during initialization.
+# Startup attribution banner: show the author credit alone for exactly 3 seconds.
+Write-Host ''
+Write-Host '============================================================' -ForegroundColor Cyan
+Write-Host '                       MADE BY MITO' -ForegroundColor Cyan
+Write-Host '============================================================' -ForegroundColor Cyan
+Start-Sleep -Seconds 3
+
+# Clear the attribution screen before showing the scanner title.
+Clear-Host
 Write-Host ''
 Write-Host '============================================================' -ForegroundColor Cyan
 Write-Host '                 FORENSIC SCANNER 8.8' -ForegroundColor White
-Write-Host '                      MADE BY MITO' -ForegroundColor Cyan
 Write-Host '============================================================' -ForegroundColor Cyan
 Write-Host ''
-Start-Sleep -Seconds 3
 
 $ErrorActionPreference = 'SilentlyContinue'  # Keep console quiet; individual operations use explicit try/catch and scanStats counters.
 
@@ -32,7 +37,7 @@ $ProgressPreference = 'SilentlyContinue'
 
 $scriptVersion = '8.8'
 
-$minimumPowerShellMajor = 5
+$minimumPowerShellVersion = [version]'5.1'
 
 $scriptStart = Get-Date
 
@@ -414,9 +419,9 @@ function Add-Result {
 
 function Test-ScannerEnvironment {
 
-  if ($PSVersionTable.PSVersion.Major -lt $minimumPowerShellMajor) {
+  if ($PSVersionTable.PSVersion -lt $minimumPowerShellVersion) {
 
-      Write-Host "[-] PowerShell $minimumPowerShellMajor or newer is required. Detected: $($PSVersionTable.PSVersion)" -ForegroundColor Red
+      Write-Host "[-] PowerShell $minimumPowerShellVersion or newer is required. Detected: $($PSVersionTable.PSVersion)" -ForegroundColor Red
 
       return $false
 
@@ -1811,16 +1816,6 @@ try {
 
 } catch {}
 
-Write-Host ''
-
-Write-Host '============================================================' -ForegroundColor Cyan
-
-Write-Host "                 FORENSIC SCANNER $scriptVersion" -ForegroundColor Cyan
-
-Write-Host '============================================================' -ForegroundColor Cyan
-
-Write-Host ''
-
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 
 if ($isAdmin) { Write-Host '[+] Administrator: YES' -ForegroundColor Green } else { Write-Host '[!] Administrator: NO - some telemetry may be unavailable' -ForegroundColor Yellow }
@@ -1924,6 +1919,7 @@ $fileScanScript = {
   $processedInterestingFiles=0
   $filesVisited=0
   $filesAnalyzed=0
+  $fileErrors=0
 
   function MatchLocal {
 
@@ -2111,14 +2107,18 @@ $fileScanScript = {
 
           if(-not(Test-Path -LiteralPath $root -PathType Container)){$scanCompleted=$false;$script:workerEnumerationErrors++;continue}
 
-          foreach($item in EnumerateFilesLocal $root $deadline){
+          # Stream file enumeration directly into the processing block. A foreach
+          # over a function call can buffer the entire result before processing,
+          # leaving FilesVisited at zero until a large tree finishes enumerating.
+          EnumerateFilesLocal $root $deadline | ForEach-Object {
+              $item = $_
 
-              if((Get-Date)-gt $deadline){$scanCompleted=$false;break}
+              if((Get-Date)-gt $deadline){$scanCompleted=$false;return}
               $filesVisited++
 
               $path=$item.FullName
 
-              if(TestPathExcludedLocal $path){continue}
+              if(TestPathExcludedLocal $path){return}
 
               $ext=$item.Extension.ToLowerInvariant()
 
@@ -2130,7 +2130,7 @@ $fileScanScript = {
 
               $interesting=$isBinary -or $isScript -or $isLink
 
-              if(-not $interesting){continue}
+              if(-not $interesting){return}
 
               $hash='';$sig='';$signerSubject='';$v=$null;$content='';$extra='';$details=@()
               $old=$null
@@ -2174,7 +2174,7 @@ $fileScanScript = {
                   if($hashCacheLocal.ContainsKey($hashKey)){
                       $hash=$hashCacheLocal[$hashKey]
                   } else {
-                      try{$hash=(Get-FileHash -LiteralPath $path -Algorithm SHA256 -ErrorAction Stop).Hash.ToUpperInvariant()}catch{$hash=''}
+                      try{$hash=(Get-FileHash -LiteralPath $path -Algorithm SHA256 -ErrorAction Stop).Hash.ToUpperInvariant()}catch{$hash='';$fileErrors++}
                       $hashCacheLocal[$hashKey]=$hash
                   }
               } elseif($old -and $old.SHA256){
@@ -2273,7 +2273,7 @@ $fileScanScript = {
               [void]$baseline.Add($identity)
               $filesAnalyzed++
 
-              if($allowlisted){continue}
+              if($allowlisted){return}
 
               if($score -ge 6 -or ($hash -and $cheatSet.Contains($hash)) -or ($behavior.Count -ge 2 -and $quickSuspicious)){
 
@@ -2341,8 +2341,8 @@ $fileScanScript = {
 
   }
 
-  if($script:workerEnumerationErrors -gt 0){$scanCompleted=$false}
-  [PSCustomObject]@{Findings=$found;Baseline=$baseline;Completed=$scanCompleted;FilesVisited=$filesVisited;FilesAnalyzed=$filesAnalyzed;EnumerationErrors=$script:workerEnumerationErrors}
+  if($script:workerEnumerationErrors -gt 0 -or $fileErrors -gt 0){$scanCompleted=$false}
+  [PSCustomObject]@{Findings=$found;Baseline=$baseline;Completed=$scanCompleted;FilesVisited=$filesVisited;FilesAnalyzed=$filesAnalyzed;FileErrors=$fileErrors;EnumerationErrors=$script:workerEnumerationErrors}
 
 }
 
@@ -3193,11 +3193,14 @@ Write-Host '[3/13] Running processes and process ancestry' -ForegroundColor Cyan
 
 $procs=@()
 
-try{$procs=@(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)}catch{}
+try{$procs=@(Get-CimInstance Win32_Process -ErrorAction Stop)}catch{$procs=@();$scanStats.ProcessErrors++}
 
 $procRows=Get-ProcessMap $procs
+$processesChecked = 0
 
 foreach($p in $procs){
+
+  $processesChecked++
 
   try{
 
@@ -3745,6 +3748,7 @@ if(-not $eventCollected){$eventHits=$null}
 $lastStillScanningMessage=Get-Date
 
 $stillScanningPrinted=$false
+$scanStatusIntervalSeconds=30
 
 # Do not block on WaitOne() here. Both scans were started in the background
 # before step 1, so step 13 polls them while keeping the console responsive.
@@ -3759,11 +3763,13 @@ while(-not ($fileCollected -and $eventCollected)){
 
       try{
 
-          $fileScanResult=$filePS.EndInvoke($fileHandle)
+          $fileOutput=@($filePS.EndInvoke($fileHandle))
+          $fileScanResult=$fileOutput | Select-Object -Last 1
 
       }catch{
 
           $fileScanResult=$null
+          $scanStats.FileErrors++
 
       }
 
@@ -3800,7 +3806,7 @@ while(-not ($fileCollected -and $eventCollected)){
 
   if($fileCollected -and $eventCollected){break}
 
-  if(($now-$lastStillScanningMessage).TotalSeconds -ge $monitorIntervalSeconds -or -not $stillScanningPrinted){
+  if(($now-$lastStillScanningMessage).TotalSeconds -ge $scanStatusIntervalSeconds -or -not $stillScanningPrinted){
 
       $running=@()
 
@@ -3867,6 +3873,9 @@ if($fileScanResult){
 
 if ($fileScanResult -and $fileScanResult.PSObject.Properties['EnumerationErrors']) {
   $scanStats.EnumerationErrors = [int]$fileScanResult.EnumerationErrors
+}
+if ($fileScanResult -and $fileScanResult.PSObject.Properties['FileErrors']) {
+  $scanStats.FileErrors = [int]$fileScanResult.FileErrors
 }
 
 Write-Host "      Matches: $($counts.Files)"
@@ -4031,9 +4040,6 @@ if($currentBaseline.Count -gt 0 -and $fileScanCompleted -and -not $baselineLoadF
 
 Invoke-HistoricalForensics
 
-if ((Get-Date) -ge $scanDeadline) {
-  $scanStats.ScanTimedOut++
-}
 $script:scanComplete = [bool]($fileScanCompleted -and $eventScanCompleted -and $scanStats.ScanTimedOut -eq 0 -and $scanStats.EnumerationErrors -eq 0 -and $scanStats.FileErrors -eq 0 -and $scanStats.WatcherErrors -eq 0 -and $scanStats.ProcessErrors -eq 0)
 
 function Write-ForensicReports {
@@ -4074,7 +4080,7 @@ function Write-ForensicReports {
 
       [void]$lines.Add('EXECUTIVE SUMMARY');[void]$lines.Add(('='*64));[void]$lines.Add("Findings: $($Findings.Count)");[void]$lines.Add("High: $high | Medium: $medium | Low: $low | Info: $info")
       [void]$lines.Add("Actionable findings: $(@($Findings | Where-Object { $_.Severity -in @('HIGH','MEDIUM') -or ($_.Severity -eq 'LOW' -and $_.Confidence -in @('High','Very High')) }).Count)")
-      [void]$lines.Add('Raw/full evidence is retained in the JSON report; this text report is intentionally concise.');[void]$lines.Add('Baseline comparisons use path, size, timestamps, and SHA256 when available; moves are correlated by matching SHA256.');[void]$lines.Add("Files visited: $filesScanned");[void]$lines.Add("Eligible files analyzed: $filesAnalyzed");[void]$lines.Add("Processes checked: $($counts.Processes)");[void]$lines.Add("Historical artifacts: $($counts.Historical)");[void]$lines.Add("Recycle Bin findings: $($counts.RecycleBin)");[void]$lines.Add("Cache findings: $($counts.Cache)");[void]$lines.Add('')
+      [void]$lines.Add('Raw/full evidence is retained in the JSON report; this text report is intentionally concise.');[void]$lines.Add('Baseline comparisons use path, size, timestamps, and SHA256 when available; moves are correlated by matching SHA256.');[void]$lines.Add("Files visited: $filesScanned");[void]$lines.Add("Eligible files analyzed: $filesAnalyzed");[void]$lines.Add("Processes checked: $processesChecked");[void]$lines.Add("Process findings: $($counts.Processes)");[void]$lines.Add("Historical artifacts: $($counts.Historical)");[void]$lines.Add("Recycle Bin findings: $($counts.RecycleBin)");[void]$lines.Add("Cache findings: $($counts.Cache)");[void]$lines.Add('')
 
       if(@($Findings | Where-Object { $_.Severity -in @('HIGH','MEDIUM') -or ($_.Severity -eq 'LOW' -and $_.Confidence -in @('High','Very High')) }).Count -eq 0){[void]$lines.Add('No actionable findings were detected. Lower-confidence/info evidence may still be present in JSON.')}
 
@@ -4103,7 +4109,7 @@ function Write-ForensicReports {
 
       }
 
-      [void]$lines.Add('SCAN STATISTICS');[void]$lines.Add(('='*64));foreach($k in @('Registry','Startup','Files','Processes','RobloxModules','Tasks','Services','Prefetch','DNS','Profiles','Defender','EventLogs','RunMRU','Integrity','Historical','RecycleBin','Cache')){[void]$lines.Add("{0}: {1}" -f $k,$counts[$k])};[void]$lines.Add("Events checked: $($scanStats.EventsChecked)");[void]$lines.Add("Errors: Files=$($scanStats.FileErrors) | Enumeration=$($scanStats.EnumerationErrors) | Watchers=$($scanStats.WatcherErrors) | Processes=$($scanStats.ProcessErrors) | Timeouts=$($scanStats.ScanTimedOut)")
+      [void]$lines.Add('SCAN STATISTICS');[void]$lines.Add(('='*64));foreach($k in @('Registry','Startup','Files','Processes','RobloxModules','Tasks','Services','Prefetch','DNS','Profiles','Defender','EventLogs','RunMRU','Integrity','Historical','RecycleBin','Cache')){[void]$lines.Add(([string]$k + ': ' + [string]$counts[$k]))};[void]$lines.Add("Events checked: $($scanStats.EventsChecked)");[void]$lines.Add("Errors: Files=$($scanStats.FileErrors) | Enumeration=$($scanStats.EnumerationErrors) | Watchers=$($scanStats.WatcherErrors) | Processes=$($scanStats.ProcessErrors) | Timeouts=$($scanStats.ScanTimedOut)")
 
       [System.IO.File]::WriteAllLines($txtPath,$lines,(New-Object System.Text.UTF8Encoding($false)))
       $txtWritten=$true
@@ -4113,7 +4119,7 @@ function Write-ForensicReports {
   try{
 
       if(-not $directoryReady){throw 'Report directory is unavailable.'}
-      $doc=[PSCustomObject]@{Version='8.8';Status=$status;ScanComplete=[bool]$script:scanComplete;SuppressedFindings=$script:suppressedFindings;StartedUtc=$scanStartedUtc.ToString('o');CompletedUtc=(Get-Date).ToUniversalTime().ToString('o');DurationSeconds=$duration;Summary=[PSCustomObject]@{Total=$Findings.Count;High=$high;Medium=$medium;Low=$low;Info=$info};ScanMetrics=[PSCustomObject]@{FilesVisited=$filesScanned;EligibleFilesAnalyzed=$filesAnalyzed;FileDetections=$counts.Files;ProcessesChecked=$counts.Processes;EventsChecked=$scanStats.EventsChecked;HistoricalArtifacts=$counts.Historical};Counts=$counts;Errors=$scanStats;Findings=@($Findings|Sort-Object @{Expression='Score';Descending=$true})}
+      $doc=[PSCustomObject]@{Version='8.8';Status=$status;ScanComplete=[bool]$script:scanComplete;SuppressedFindings=$script:suppressedFindings;StartedUtc=$scanStartedUtc.ToString('o');CompletedUtc=(Get-Date).ToUniversalTime().ToString('o');DurationSeconds=$duration;Summary=[PSCustomObject]@{Total=$Findings.Count;High=$high;Medium=$medium;Low=$low;Info=$info};ScanMetrics=[PSCustomObject]@{FilesVisited=$filesScanned;EligibleFilesAnalyzed=$filesAnalyzed;FileDetections=$counts.Files;ProcessesChecked=$processesChecked;ProcessFindings=$counts.Processes;EventsChecked=$scanStats.EventsChecked;HistoricalArtifacts=$counts.Historical};Counts=$counts;Errors=$scanStats;Findings=@($Findings|Sort-Object @{Expression='Score';Descending=$true})}
 
       [System.IO.File]::WriteAllText($jsonPath,($doc|ConvertTo-Json -Depth 8),(New-Object System.Text.UTF8Encoding($false)))
       $jsonWritten=$true
@@ -4167,7 +4173,8 @@ Write-Host ''
 Write-Host ("Files visited     : {0:N0}" -f $filesScannedFinal) -ForegroundColor Gray
 Write-Host ("Eligible analyzed : {0:N0}" -f $filesAnalyzedFinal) -ForegroundColor Gray
 
-Write-Host ("Processes checked : {0:N0}" -f $counts.Processes) -ForegroundColor Gray
+Write-Host ("Processes checked : {0:N0}" -f $processesChecked) -ForegroundColor Gray
+Write-Host ("Process findings  : {0:N0}" -f $counts.Processes) -ForegroundColor Gray
 
 Write-Host ("Events checked    : {0:N0}" -f $eventsChecked) -ForegroundColor Gray
 
