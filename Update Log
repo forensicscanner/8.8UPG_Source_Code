@@ -1,0 +1,78 @@
+Forensic Scanner 8.8 — Update Log
+
+Created by Mito
+
+What’s New in 8.8
+
+🛠️ Bug Fixes & Improvements
+
+* Fixed evidence synchronization during finding correlation and final confidence scoring.
+* Fixed event-log counting issues.
+* Improved file and directory enumeration reliability.
+* Prevented incomplete or failed file scans from overwriting the existing baseline.
+* Fixed self-folder path boundary handling.
+* Improved scan-completeness checks and error reporting.
+* Fixed process statistics to distinguish between processes checked and suspicious process findings.
+* Improved baseline comparison and file-integrity reporting.
+* Fixed duplicate timeout counting.
+* Improved report generation and error handling.
+
+⚡ Performance Improvements
+
+* Optimized file scanning while retaining SHA256 coverage.
+* Deferred expensive PE metadata and signature checks for ordinary unchanged binaries.
+* Retained deeper analysis for suspicious or modified binaries.
+* Improved scan workload pacing and processing efficiency.
+* Reduced unnecessary repeated operations.
+
+🔍 Detection & Forensic Improvements
+
+* Improved correlation between process activity, loaded modules, file hashes and historical artifacts.
+* Added or improved evidence collection from:
+    * Windows Prefetch
+    * UserAssist
+    * Amcache
+    * Shimcache / AppCompat
+    * Windows Defender history
+    * Windows Event Logs
+    * Recent Files and Jump Lists
+    * Recycle Bin metadata
+    * DNS cache
+    * PowerShell command history
+* Improved confidence scoring using multiple independent evidence sources.
+* Reduced false positives from weak static binary strings.
+* Improved file replacement and moved/renamed file detection using SHA256 baseline comparisons.
+
+📊 Reporting
+
+* Improved TXT and JSON report generation.
+* Added separate process counts:
+    * Processes checked
+    * Process findings
+* Added more detailed scan metrics and error statistics.
+* Improved reporting of incomplete scans and baseline comparison limitations.
+
+👁️ Continuous Monitoring
+
+* Added optional continuous monitoring with -Monitor.
+* Added filesystem monitoring for file creation, modification and renaming.
+* Added process and module monitoring.
+* Added monitoring error tracking and bounded processing.
+
+🎨 Interface
+
+* Added a separate MADE BY MITO startup screen.
+* Added a 3-second startup attribution display.
+* Added automatic console clearing before the main scanner banner.
+* Fixed the duplicate FORENSIC SCANNER 8.8 banner.
+
+💻 Compatibility
+
+* Minimum supported version: Windows PowerShell 5.1.
+* PowerShell 7.x is also targeted.
+
+⸻
+
+Important: Forensic Scanner is an evidence-based forensic tool. Findings are indicators that require interpretation, not automatic proof of malicious activity.
+
+Only trust copies distributed through the official source maintained by Mito. Do not run modified or unofficial copies from untrusted individuals.
